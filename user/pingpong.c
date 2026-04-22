@@ -62,11 +62,12 @@ main(int argc, char* argv[])
     close(p[0]);
     write(p[1], "f", 1);
     close(p[1]);
-    wait(0);
+    // wait(0);
     close(q[1]);
     read(q[0], buf, 1);
     close(q[0]);
     pid = getpid();
-    fprintf(1, "%d: received pong\n", pid, buf[0]);
+    fprintf(1, "%d: received pong\n", pid);
+    wait(0);
     exit(0);
 }
