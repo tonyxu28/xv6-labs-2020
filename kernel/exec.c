@@ -107,7 +107,14 @@ exec(char *path, char **argv)
     if(*s == '/')
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
-    
+
+  if(oldsz > 0)
+    uvmunmap(p->kpagetable, 0, PGROUNDUP(oldsz) / PGSIZE, 0);
+  if(uvm2kvm(pagetable, p->kpagetable, 0, sz) < 0){
+    if(oldsz > 0 && uvm2kvm(p->pagetable, p->kpagetable, 0, oldsz) < 0)
+      panic("exec: restore kpagetable");
+    goto bad;
+  }
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
@@ -116,6 +123,8 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  if(p->pid == 1)
+    vmprint(p->pagetable);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

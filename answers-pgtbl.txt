@@ -1,0 +1,45 @@
+srcva 和 len 都是 uint64 类型。当 srcva + len 超过 uint64
+能够表示的最大值时，加法结果会发生无符号整数回绕，变成一个
+较小的数。前两个边界检查可能因此无法发现越界，所以需要第三个
+检查 srcva + len < srcva 来检测回绕。
+
+例如，令：
+
+p->sz = 0x1000
+srcva = 0x100
+len   = 0xffffffffffffff7f
+
+在64位无符号整数运算中：
+
+srcva + len = 0x7f
+
+第一个测试：
+
+srcva >= p->sz
+0x100 >= 0x1000，为假。
+
+第二个测试：
+
+srcva + len >= p->sz
+0x7f >= 0x1000，为假。
+
+第三个测试：
+
+srcva + len < srcva
+0x7f < 0x100，为真。
+
+因此第三个测试可以发现 srcva + len 发生了 uint64 溢出，
+避免 memmove 使用错误的超大长度访问内存。
+
+vmprint输出中的每一级缩进对应Sv39页表的一层。低地址部分最
+后一级的索引0、1、2分别映射虚拟page 0、page 1和page 2。
+
+Page 0包含/init程序从ELF文件加载的代码、数据和BSS。它的
+PTE带有V、R、W、X和U标志，因此用户态可以访问。
+
+Page 2是/init的用户栈，其中保存argv参数字符串、argv指针
+数组和其他栈数据。
+
+Page 1是位于程序和用户栈之间的栈保护页。它的PTE有效，也有
+R/W等权限，但是exec通过uvmclear清除了PTE_U。因此用户模式
+不能读取或写入page 1；用户态访问它会产生page fault。

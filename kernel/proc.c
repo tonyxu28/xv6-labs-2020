@@ -38,7 +38,7 @@ procinit(void)
       if(pa == 0)
         panic("kalloc");
       uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      kvmmap(kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
   }
   kvminithart();
@@ -120,6 +120,18 @@ found:
     release(&p->lock);
     return 0;
   }
+  p->kpagetable = kvmmake();
+  if(p->kpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  uint64 pa = kvmpa(p->kstack);
+  if(mappages(p->kpagetable, p->kstack, PGSIZE, pa, PTE_R | PTE_W) != 0){
+  freeproc(p);
+  release(&p->lock);
+  return 0;
+}
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -142,6 +154,10 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if(p->kpagetable)
+    kvmfree(p->kpagetable);
+  p->kpagetable = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -220,6 +236,8 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  if(uvm2kvm(p->pagetable, p->kpagetable, 0, p->sz) < 0)
+    panic("userinit: uvm2kvm");
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -235,21 +253,48 @@ userinit(void)
 
 // Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
+
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 oldsz, newsz;
   struct proc *p = myproc();
 
-  sz = p->sz;
+  oldsz = p->sz;
+  newsz = oldsz;
+
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    // First allocate pages in the user page table.
+    if((newsz = uvmalloc(p->pagetable, oldsz, oldsz + n)) == 0)
+      return -1;
+
+    // Then map the new pages into the process's kernel page table.
+    if(uvm2kvm(p->pagetable, p->kpagetable, oldsz, newsz) < 0){
+      // Undo the newly allocated user pages.
+      uvmdealloc(p->pagetable, newsz, oldsz);
       return -1;
     }
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uint64 shrink = (uint64)(-(long)n);
+
+    // Do not allow the address space size to become negative.
+    if(shrink > oldsz)
+      return -1;
+
+    newsz = oldsz - shrink;
+
+    // Remove kernel aliases for pages that will be freed.
+    // Do not free the physical pages here.
+    if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
+      uint64 npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+      uvmunmap(p->kpagetable, PGROUNDUP(newsz), npages, 0);
+    }
+
+    // Remove the user mappings and free the physical pages.
+    newsz = uvmdealloc(p->pagetable, oldsz, newsz);
   }
-  p->sz = sz;
+
+  p->sz = newsz;
   return 0;
 }
 
@@ -274,6 +319,12 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  // Map the child's user pages into its kernel page table.
+  if(uvm2kvm(np->pagetable, np->kpagetable, 0, np->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
 
   np->parent = p;
 
@@ -473,7 +524,11 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
